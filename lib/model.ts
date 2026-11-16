@@ -11,10 +11,15 @@
 //
 //   1. COMPS CURVE. Fit log10(mcap) = a + b*log10(tvl) by least squares on the
 //      protocols whose token already trades (mcap_usd > 0, tvl_usd > 0, not a CEX).
-//      Two refinements were TESTED and REJECTED on the blind check below, and the
-//      dashboard says so: a per-category residual correction made held-out error
-//      worse, and a growth term in the fit did too. The model therefore uses the
-//      plain curve, and nothing else, for the comps base.
+//      Five refinements were TESTED and REJECTED on the blind check below, and the
+//      dashboard says so with their numbers: a per-category residual correction, a
+//      global median mcap/TVL ratio, a fitted growth term, a fitted age term and a
+//      quadratic curve all made held-out error worse than the plain curve's 82.0%.
+//      A wider sweep (37 candidates: LAD and Huber robust fits, ridge, ratio
+//      trimming, excluding bridges/staking from the fit, piecewise fits, category
+//      shrinkage at several strengths) found nothing that beat the plain curve on
+//      the same 5 folds either. The model therefore uses the plain curve, and
+//      nothing else, for the comps base.
 //   2. GROWTH. growthMult = 1 + clamp(change_7d, -50, 100)/100 * 0.35.
 //   3. MATURITY. maturityMult = 0.7 + 0.3 * min(age_days, 1095)/1095; a protocol
 //      with no listed_at uses 0.85 (the value at 548 days).
@@ -89,6 +94,12 @@ export interface CompsFit {
   cat_median_pct_err: number;
   /** Held-out median % error of the REJECTED global median mcap/TVL ratio (same 5 folds). */
   ratio_median_pct_err: number;
+  /** Held-out median % error of the REJECTED fitted growth term (same 5 folds). */
+  growth_median_pct_err: number;
+  /** Held-out median % error of the REJECTED fitted age term (same 5 folds). */
+  age_median_pct_err: number;
+  /** Held-out median % error of the REJECTED quadratic curve (same 5 folds). */
+  quad_median_pct_err: number;
 }
 
 /** The model's constants, as the dashboard states them. */
@@ -357,6 +368,68 @@ function heldOutRatioPctErrors(train: SnapshotProtocol[], test: SnapshotProtocol
   return test.map((p) => Math.abs(p.tvl_usd * ratio - p.mcap_usd!) / p.mcap_usd! * 100);
 }
 
+/** One live protocol's regression features: log TVL, clamped 7d growth, log age. */
+interface Feats { x: number; g: number; logAge: number }
+
+function featsOf(p: SnapshotProtocol, asOf: string): Feats {
+  const age = ageDays(asOf, p.listed_at);
+  return {
+    x: Math.log10(p.tvl_usd),
+    g: Math.min(100, Math.max(-50, finite(p.change_7d, 0))) / 100,
+    logAge: Math.log10((age === null ? 548 : age) + 1),
+  };
+}
+
+/** Solve a small dense linear system by Gaussian elimination, or null when singular. */
+function solveLinear(a: number[][], b: number[]): number[] | null {
+  const n = b.length;
+  const m = a.map((r, i) => [...r, b[i]!]);
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(m[r]![c]!) > Math.abs(m[piv]![c]!)) piv = r;
+    [m[c], m[piv]] = [m[piv]!, m[c]!];
+    if (Math.abs(m[c]![c]!) < 1e-12) return null;
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = m[r]![c]! / m[c]![c]!;
+      for (let k = c; k <= n; k++) m[r]![k]! -= f * m[c]![k]!;
+    }
+  }
+  return m.map((r, i) => r[n]! / m[i]![i]!);
+}
+
+/** Least squares on `train` for a feature map, or null when the system is singular. */
+function fitFeatures(train: SnapshotProtocol[], asOf: string, feats: (f: Feats) => number[]): ((f: Feats) => number) | null {
+  const p = feats(featsOf(train[0]!, asOf)).length;
+  const xtx: number[][] = Array.from({ length: p }, () => new Array<number>(p).fill(0));
+  const xty: number[] = new Array<number>(p).fill(0);
+  for (const q of train) {
+    const f = feats(featsOf(q, asOf));
+    const y = Math.log10(q.mcap_usd!);
+    for (let i = 0; i < p; i++) {
+      xty[i]! += f[i]! * y;
+      for (let j = 0; j < p; j++) xtx[i]![j]! += f[i]! * f[j]!;
+    }
+  }
+  const beta = solveLinear(xtx, xty);
+  if (beta === null) return null;
+  return (f: Feats) => feats(f).reduce((s, v, i) => s + v * beta[i]!, 0);
+}
+
+/**
+ * Absolute % errors of `test` under a least-squares fit of `feats` on `train`.
+ * The three rejected alternatives below share this helper and the same 5 folds as
+ * the plain curve, so their published errors are directly comparable to it.
+ */
+function heldOutFeatPctErrors(train: SnapshotProtocol[], test: SnapshotProtocol[], asOf: string, feats: (f: Feats) => number[]): number[] {
+  const predict = fitFeatures(train, asOf, feats);
+  if (predict === null) return [];
+  return test.map((p) => {
+    const pred = Math.pow(10, predict(featsOf(p, asOf)));
+    return Math.abs(pred - p.mcap_usd!) / p.mcap_usd! * 100;
+  });
+}
+
 function slugHash(slug: string): number {
   return [...slug].reduce((s, ch) => s + ch.charCodeAt(0), 0) % 5;
 }
@@ -374,6 +447,9 @@ export function fitComps(snapshot: Snapshot, model: ModelConstants = MODEL): Com
   const foldPctErrs: number[] = [];
   const foldCatErrs: number[] = [];
   const foldRatioErrs: number[] = [];
+  const foldGrowthErrs: number[] = [];
+  const foldAgeErrs: number[] = [];
+  const foldQuadErrs: number[] = [];
   for (let k = 0; k < 5; k++) {
     const test = live.filter((p) => slugHash(p.slug) === k);
     const train = live.filter((p) => slugHash(p.slug) !== k);
@@ -382,6 +458,12 @@ export function fitComps(snapshot: Snapshot, model: ModelConstants = MODEL): Com
       foldPctErrs.push(...heldOutPctErrors(train, test));
       foldCatErrs.push(...heldOutCatPctErrors(train, test));
       foldRatioErrs.push(...heldOutRatioPctErrors(train, test));
+      // The rejected fitted terms, on the same folds: a growth term, an age term
+      // and a quadratic in log TVL. Each lost to the plain curve, so growth and
+      // age stay stated priors and the curve stays straight (see the dashboard).
+      foldGrowthErrs.push(...heldOutFeatPctErrors(train, test, snapshot.as_of, (f) => [1, f.x, f.g]));
+      foldAgeErrs.push(...heldOutFeatPctErrors(train, test, snapshot.as_of, (f) => [1, f.x, f.logAge]));
+      foldQuadErrs.push(...heldOutFeatPctErrors(train, test, snapshot.as_of, (f) => [1, f.x, (f.x - 8.5) ** 2]));
     }
   }
   const foldMed = median(foldLogErrs);
@@ -407,6 +489,9 @@ export function fitComps(snapshot: Snapshot, model: ModelConstants = MODEL): Com
     band_log: round4(foldMed),
     cat_median_pct_err: pct1(median(foldCatErrs)),
     ratio_median_pct_err: pct1(median(foldRatioErrs)),
+    growth_median_pct_err: pct1(median(foldGrowthErrs)),
+    age_median_pct_err: pct1(median(foldAgeErrs)),
+    quad_median_pct_err: pct1(median(foldQuadErrs)),
   };
 }
 
