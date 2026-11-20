@@ -1,15 +1,83 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar: pre-token protocols ranked by comps-implied value</title>
+<title>Launch Radar — token launch radar</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<a class="skip" href="#board">Skip to the board</a>
-<main id="board" tabindex="-1" aria-busy="true"><p class="loading">Loading the radar&hellip;</p></main>
-<script src="../data.js"></script>
+<header class="top">
+  <h1>Launch Radar</h1>
+  <p class="tag">Every protocol that records no token, ranked by what its launch would be worth: model launch value &times; launch odds from the peers&rsquo; record.</p>
+  <p class="model-line" id="modelLine"></p>
+</header>
+
+<section class="kpis" id="kpis" aria-label="Coverage and model integrity"></section>
+
+<section id="detailWrap" class="detail-wrap" hidden>
+  <h2>Protocol detail</h2>
+  <div id="detail"></div>
+  <p><a class="back" href="#">&larr; Back to the full board</a></p>
+</section>
+
+<section class="board-wrap" id="boardWrap">
+  <h2>The board <span class="count" id="rowCount"></span></h2>
+  <p class="note">Chain = cheapest non-Ethereum chain for farming; Ethereum only when it is the protocol&rsquo;s only chain.</p>
+  <div class="filters">
+    <label>Category <select id="fCat"></select></label>
+    <label>Chain <select id="fChain"></select></label>
+    <label>Verdict <select id="fVerdict"><option value="">All</option><option>Farm</option><option>Thin</option><option>Skip</option></select></label>
+    <label>Min TVL $ <input id="fMinTvl" type="number" min="0" step="1000000" placeholder="5,000,000"></label>
+    <label class="chk"><input id="fWatch" type="checkbox"> Watchlist only</label>
+    <label>Search <input id="fText" type="search" placeholder="name or slug"></label>
+  </div>
+  <div class="table-scroll">
+  <table id="board">
+    <thead><tr>
+      <th data-k="rank">Rank</th><th data-k="name">Protocol</th><th data-k="cat">Category</th>
+      <th data-k="chain">Farm chain</th><th data-k="tvl">TVL</th><th data-k="chg">7d</th><th data-k="age">Age</th>
+      <th data-k="launch">Launch value</th><th data-k="odds">Odds</th><th data-k="exp">Expected value</th>
+      <th data-k="band">Band</th><th data-k="verdict">Verdict</th><th data-k="cost">Farm cost</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  </div>
+  <p class="hint">Click a column header to sort. Click a row to open its detail view and farm plan.</p>
+</section>
+
+<section class="model">
+  <h2>Model &amp; validation</h2>
+  <p id="formula"></p>
+  <p class="note" id="fitNote"></p>
+  <h3>Terms tested (kept only if 5-fold held-out median error improves by &ge; 2 points)</h3>
+  <table class="small"><thead><tr><th>Term</th><th>Rows fitted</th><th>Base 5-fold error</th><th>Term 5-fold error</th><th>Kept?</th></tr></thead><tbody id="termsBody"></tbody></table>
+  <h3>Validation — median absolute percentage error</h3>
+  <table class="small"><thead><tr><th>Test</th><th>Error</th><th>Detail</th></tr></thead><tbody id="validBody"></tbody></table>
+  <h3>Calibration — trading anchors by predicted value, deciles</h3>
+  <table class="small"><thead><tr><th>Decile</th><th>n</th><th>Median predicted</th><th>Median actual</th><th>Median ratio</th></tr></thead><tbody id="calBody"></tbody></table>
+  <h3>Launch odds</h3>
+  <p>Odds = the share of similar protocols that record a token (peers&rsquo; record, shrunk toward the overall share). It describes the record; it does not predict whether or when a token is issued. Protocols are grouped by category group (the 6 largest categories, everything else as Other) &times; TVL band ($5M&ndash;$20M, $20M&ndash;$100M, $100M&ndash;$1B, $1B+). Raw share = trading protocols in the cell / all protocols in the cell. Shrunk odds = (trading in cell + 20 &times; overall share) / (n in cell + 20), clamped to [0.02, 0.95]. A cell with fewer than 5 protocols falls back to its category-level share, then to the overall share.</p>
+  <p class="note" id="oddsNote"></p>
+</section>
+
+<section class="method">
+  <h2>Farm method</h2>
+  <ul>
+    <li><b>Gas (assumption):</b> Ethereum $8.00 per action, every other chain $0.50 per action. A protocol&rsquo;s farm chain is the cheapest chain in its chains list under this rule (Ethereum only if it is the only chain listed).</li>
+    <li><b>Farm cost:</b> 4 weekly actions &times; gas + first-transaction gas. Mid cost is $2.50 on a $0.50 chain and $40 on Ethereum; low is half of mid, high is double mid.</li>
+    <li><b>Deposit (assumption):</b> farm-size deposit $150 on cheap chains, $50 on Ethereum (high gas). Farm verdict = full deposit, Thin = half deposit, Skip = $0.</li>
+    <li><b>Farmer&rsquo;s share (assumption):</b> a small farmer receives 0.1% of the launch value. Farmer gain = expected value &times; 0.001.</li>
+    <li><b>Verdict rule:</b> Farm if farmer gain &gt; 3 &times; farm cost (mid); Thin if farmer gain &gt; 1 &times; farm cost; otherwise Skip. Breakeven = farm cost (mid): the airdrop value the farmer must receive to break even.</li>
+    <li><b>Honesty:</b> &ldquo;records no token&rdquo; means the snapshot&rsquo;s record carries no token for the protocol — it is not proof that no token exists. Odds describe the peers&rsquo; record; they do not predict whether or when a token is issued.</li>
+  </ul>
+</section>
+
+<footer>
+  <p id="footSrc"></p>
+  <p>Launch Radar ranks protocols that record no token by expected value = model launch value &times; launch odds. The board&rsquo;s implied value is this entry&rsquo;s own claim. Palette: dark slate, light text, sky accent; green = Farm, amber = Thin, grey = Skip.</p>
+</footer>
+<script src="data.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
